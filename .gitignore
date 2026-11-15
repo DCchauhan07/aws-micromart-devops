@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Application data
+data/
+logs/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local environment
+.env
+*.pem
+order.env
+
+# Local backups
+*.backup.yaml
+*.tar.gz
+
+# Editor and OS
+.vscode/
+.idea/
+.DS_Store

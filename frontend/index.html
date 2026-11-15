@@ -1,0 +1,246 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1">
+  <title>MicroMart | AWS DevOps Project</title>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f3f6fb;
+      color: #17243c;
+    }
+
+    header {
+      background: #163e78;
+      color: white;
+      padding: 25px 8%;
+    }
+
+    header h1 { margin: 0 0 8px; }
+
+    main {
+      max-width: 1100px;
+      margin: auto;
+      padding: 30px 20px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns:
+        repeat(auto-fit, minmax(230px, 1fr));
+      gap: 20px;
+    }
+
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 22px;
+      box-shadow: 0 3px 12px #00000012;
+    }
+
+    .price {
+      font-size: 23px;
+      color: #146c43;
+      font-weight: bold;
+    }
+
+    button {
+      background: #1764bd;
+      color: white;
+      border: 0;
+      border-radius: 6px;
+      padding: 11px 15px;
+      cursor: pointer;
+    }
+
+    button:hover { background: #104d94; }
+    button:disabled { opacity: .5; cursor: wait; }
+
+    input {
+      width: 65px;
+      padding: 9px;
+      margin-right: 8px;
+    }
+
+    #message {
+      margin: 20px 0;
+      font-weight: bold;
+    }
+
+    .success { color: #11773e; }
+    .error { color: #c02626; }
+
+    li { margin: 10px 0; }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>MicroMart Cloud Store</h1>
+    <p>AWS Containerized Microservices Demo</p>
+  </header>
+
+  <main>
+    <h2>Available Products</h2>
+    <div id="products" class="grid">
+      Loading products...
+    </div>
+
+    <p id="message" role="status" aria-live="polite"></p>
+
+    <section class="card">
+      <h2>Order History</h2>
+      <button id="refresh">Refresh Orders</button>
+      <ul id="orders"></ul>
+    </section>
+  </main>
+
+  <script>
+    const money = cents =>
+      new Intl.NumberFormat("en-IE", {
+        style: "currency",
+        currency: "EUR"
+      }).format(cents / 100);
+
+    function showMessage(text, error = false) {
+      const element = document.getElementById("message");
+      element.textContent = text;
+      element.className = error ? "error" : "success";
+    }
+
+    async function loadProducts() {
+      const container = document.getElementById("products");
+
+      try {
+        const response = await fetch("/api/products");
+        if (!response.ok) throw new Error("Product API failed");
+
+        const products = await response.json();
+        container.replaceChildren();
+
+        for (const product of products) {
+          const card = document.createElement("div");
+          card.className = "card";
+
+          const title = document.createElement("h3");
+          title.textContent = product.name;
+
+          const price = document.createElement("p");
+          price.className = "price";
+          price.textContent = money(product.price_cents);
+
+          const stock = document.createElement("p");
+          stock.textContent = `Catalog stock: ${product.stock}`;
+
+          const quantity = document.createElement("input");
+          quantity.type = "number";
+          quantity.min = "1";
+          quantity.max = String(Math.min(10, product.stock));
+          quantity.value = "1";
+          quantity.setAttribute("aria-label", "Quantity");
+
+          const button = document.createElement("button");
+          button.textContent = "Place Order";
+          button.disabled = product.stock < 1;
+
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+
+            try {
+              await placeOrder(
+                product.id,
+                Number(quantity.value)
+              );
+            } finally {
+              button.disabled = product.stock < 1;
+            }
+          });
+
+          card.append(title, price, stock, quantity, button);
+          container.appendChild(card);
+        }
+      } catch (error) {
+        container.textContent = "Could not load products.";
+        showMessage(error.message, true);
+      }
+    }
+
+    async function placeOrder(productId, quantity) {
+      if (!Number.isInteger(quantity) ||
+          quantity < 1 || quantity > 10) {
+        showMessage("Enter a quantity between 1 and 10.", true);
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/orders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            product_id: productId,
+            quantity: quantity
+          })
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || "Order failed");
+        }
+
+        showMessage(
+          `Order #${result.order_id} created. Total: ` +
+          money(result.total_cents)
+        );
+
+        await loadOrders();
+
+      } catch (error) {
+        showMessage(error.message, true);
+      }
+    }
+
+    async function loadOrders() {
+      const list = document.getElementById("orders");
+
+      try {
+        const response = await fetch("/api/orders");
+        if (!response.ok) throw new Error("Order API failed");
+
+        const orders = await response.json();
+        list.replaceChildren();
+
+        for (const order of orders) {
+          const item = document.createElement("li");
+          item.textContent =
+            `#${order.id} — ${order.product_name} × ` +
+            `${order.quantity} — ${money(order.total_cents)}`;
+          list.appendChild(item);
+        }
+
+        if (orders.length === 0) {
+          const item = document.createElement("li");
+          item.textContent = "No orders yet.";
+          list.appendChild(item);
+        }
+      } catch (error) {
+        list.textContent = "Unable to load orders.";
+      }
+    }
+
+    document.getElementById("refresh")
+      .addEventListener("click", loadOrders);
+
+    loadProducts();
+    loadOrders();
+  </script>
+</body>
+</html>
+
