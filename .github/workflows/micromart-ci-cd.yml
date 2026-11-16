@@ -1,0 +1,36 @@
+
+name: MicroMart CI-CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Test and Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Python validation
+        run: |
+          python -m compileall -q .
+
+      - name: Compose validation
+        run: |
+          docker compose config -q
+
+      - name: Docker build
+        run: |
+          docker compose build
