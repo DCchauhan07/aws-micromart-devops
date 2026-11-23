@@ -31,15 +31,18 @@ jobs:
           docker build -t micromart-product:ci ./product-service
           docker build -t micromart-order:ci ./order-service
 
+  
   deploy:
     name: Deploy to AWS EC2
     needs: ci
 
     if: >
-      github.event_name == 'workflow_dispatch' &&
+      (github.event_name == 'push' ||
+       github.event_name == 'workflow_dispatch') &&
       github.ref == 'refs/heads/main'
 
     runs-on: ubuntu-24.04
+
 
     permissions:
       contents: read
