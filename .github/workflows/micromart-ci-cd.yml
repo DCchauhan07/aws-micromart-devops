@@ -54,6 +54,15 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
+      
+       # ADD THIS NEW STEP
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Package release
+        run: |
+          git archive --format=tar HEAD | gzip > release.tar.gz   
 
       - name: Package release
         run: |
