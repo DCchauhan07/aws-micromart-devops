@@ -4,14 +4,26 @@ name: MicroMart CI-CD
 on:
   push:
     branches: [main]
+
   pull_request:
     branches: [main]
+
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Prevent two deployment runs from modifying EC2 simultaneously.
+concurrency:
+  group: micromart-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+
+  # ==========================================
+  # JOB 1: CONTINUOUS INTEGRATION
+  # ==========================================
+
   ci:
     name: Test and Build
     runs-on: ubuntu-24.04
@@ -28,106 +40,267 @@ jobs:
 
       - name: Build Docker images
         run: |
-          docker build -t micromart-product:ci ./product-service
-          docker build -t micromart-order:ci ./order-service
+          docker build \
+            -t micromart-product:ci \
+            ./product-service
 
-  
+          docker build \
+            -t micromart-order:ci \
+            ./order-service
+
+      - name: CI completed
+        run: |
+          echo "MicroMart CI completed successfully."
+
+
+  # ==========================================
+  # JOB 2: CONTINUOUS DEPLOYMENT
+  # ==========================================
+
   deploy:
     name: Deploy to AWS EC2
+
     needs: ci
 
-    if: >
-      (github.event_name == 'push' ||
-       github.event_name == 'workflow_dispatch') &&
+    # Deploy only when manually triggered on main.
+    # This protects the existing running application.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main'
 
     runs-on: ubuntu-24.04
-
 
     permissions:
       contents: read
       id-token: write
 
+    timeout-minutes: 30
+
     steps:
+
+      # --------------------------------------
+      # STEP 1: CHECKOUT
+      # --------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
+
+      # --------------------------------------
+      # STEP 2: GITHUB OIDC DIAGNOSTICS
+      # --------------------------------------
+
+      - name: Diagnose GitHub OIDC context
+        env:
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REF: ${{ github.ref }}
+          GH_EVENT: ${{ github.event_name }}
+          AWS_ROLE: ${{ vars.AWS_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          echo "===== GitHub OIDC Context ====="
+
+          echo "Repository: $GH_REPOSITORY"
+          echo "Branch/Ref: $GH_REF"
+          echo "Event: $GH_EVENT"
+          echo "AWS Role ARN: $AWS_ROLE"
+          echo "AWS Region: $AWS_REGION"
+
+          test -n "$AWS_ROLE" || {
+            echo "ERROR: AWS_ROLE_ARN is missing"
+            exit 1
+          }
+
+          test -n "$AWS_REGION" || {
+            echo "ERROR: AWS_REGION is missing"
+            exit 1
+          }
+
+          echo "OIDC context verification completed."
+
+
+      # --------------------------------------
+      # STEP 3: AWS OIDC AUTHENTICATION
+      # --------------------------------------
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
+
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-      
-       # ADD THIS NEW STEP
+          role-session-name: MicroMartGitHubDeployment
+          role-duration-seconds: 3600
+
+
+      # --------------------------------------
+      # STEP 4: VERIFY AWS AUTHENTICATION
+      # --------------------------------------
+
       - name: Verify AWS identity
         run: |
+          echo "===== AWS Identity ====="
+
           aws sts get-caller-identity
 
-      - name: Package release
-        run: |
-          git archive --format=tar HEAD | gzip > release.tar.gz   
+          echo "AWS authentication successful."
+
+
+      # --------------------------------------
+      # STEP 5: PACKAGE APPLICATION
+      # --------------------------------------
 
       - name: Package release
         run: |
-          git archive --format=tar HEAD | gzip > release.tar.gz
+          echo "Creating MicroMart release package..."
+
+          git archive \
+            --format=tar \
+            HEAD | gzip > release.tar.gz
+
+          ls -lh release.tar.gz
+
+          echo "Release SHA: $GITHUB_SHA"
+
+
+      # --------------------------------------
+      # STEP 6: UPLOAD TO S3
+      # --------------------------------------
 
       - name: Upload release to S3
+        env:
+          BUCKET: ${{ vars.ARTIFACT_BUCKET }}
         run: |
-          aws s3 cp release.tar.gz \
-            "s3://${{ vars.ARTIFACT_BUCKET }}/releases/${GITHUB_SHA}.tar.gz"
+          set -euo pipefail
+
+          test -n "$BUCKET" || {
+            echo "ERROR: ARTIFACT_BUCKET is missing"
+            exit 1
+          }
+
+          echo "Uploading MicroMart release to S3..."
+
+          aws s3 cp \
+            release.tar.gz \
+            "s3://${BUCKET}/releases/${GITHUB_SHA}.tar.gz"
+
+          echo "Release uploaded successfully."
+
+
+      # --------------------------------------
+      # STEP 7: TRIGGER EC2 DEPLOYMENT
+      # --------------------------------------
 
       - name: Send SSM deployment command
         id: deployment
+
         env:
           EC2_ID: ${{ vars.EC2_INSTANCE_ID }}
           BUCKET: ${{ vars.ARTIFACT_BUCKET }}
           REGION: ${{ vars.AWS_REGION }}
+
         run: |
+          set -euo pipefail
+
+          test -n "$EC2_ID" || {
+            echo "ERROR: EC2_INSTANCE_ID is missing"
+            exit 1
+          }
+
+          echo "Triggering deployment on EC2: $EC2_ID"
+
           COMMAND="sudo -u ubuntu env AWS_DEFAULT_REGION=${REGION} /usr/local/bin/micromart-deploy ${GITHUB_SHA} ${BUCKET}"
 
-          jq -n --arg command "$COMMAND" \
-            '{commands:[$command],executionTimeout:["1800"]}' \
-            > parameters.json
+          jq -n \
+            --arg command "$COMMAND" \
+            '{
+              commands: [$command],
+              executionTimeout: ["1800"]
+            }' > parameters.json
 
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$EC2_ID" \
             --document-name "AWS-RunShellScript" \
             --parameters file://parameters.json \
+            --timeout-seconds 1800 \
             --query "Command.CommandId" \
             --output text)
 
           echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
 
+          echo "SSM Command ID: $COMMAND_ID"
+
+
+      # --------------------------------------
+      # STEP 8: VERIFY DEPLOYMENT
+      # --------------------------------------
+
       - name: Verify deployment
+
         env:
           EC2_ID: ${{ vars.EC2_INSTANCE_ID }}
           COMMAND_ID: ${{ steps.deployment.outputs.command_id }}
+
         run: |
+          set -euo pipefail
+
+          echo "Monitoring MicroMart deployment..."
+
           for attempt in $(seq 1 90); do
+
             STATUS=$(aws ssm get-command-invocation \
               --command-id "$COMMAND_ID" \
               --instance-id "$EC2_ID" \
               --query Status \
               --output text 2>/dev/null || echo Pending)
 
-            echo "Deployment status: $STATUS"
+            echo "Attempt $attempt: $STATUS"
 
             if [ "$STATUS" = "Success" ]; then
-              echo "AWS deployment completed successfully"
+
+              echo "Deployment completed successfully."
+
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$EC2_ID" \
+                --query '{Status:Status,Output:StandardOutputContent,Errors:StandardErrorContent}' \
+                --output json
+
               exit 0
             fi
 
             if [[ "$STATUS" == "Failed" ||
                   "$STATUS" == "Cancelled" ||
-                  "$STATUS" == "TimedOut" ]]; then
+                  "$STATUS" == "TimedOut" ||
+                  "$STATUS" == "Cancelling" ]]; then
+
+              echo "ERROR: Deployment failed."
+
               aws ssm get-command-invocation \
                 --command-id "$COMMAND_ID" \
-                --instance-id "$EC2_ID"
+                --instance-id "$EC2_ID" \
+                --output json
+
               exit 1
             fi
 
             sleep 10
           done
 
-          echo "Deployment verification timed out"
+          echo "ERROR: Deployment verification timed out."
           exit 1
+
+
+      # --------------------------------------
+      # STEP 9: COMPLETION
+      # --------------------------------------
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "================================"
+          echo "MicroMart Deployment Successful"
+          echo "================================"
+          echo "Commit: $GITHUB_SHA"
+          echo "Environment: AWS EC2"
+          echo "Deployment: Docker Compose"
